@@ -1,6 +1,6 @@
 ---
 title: "Large Scale Index quality checking"
-author: "DaN"
+author: ""
 date: "`r Sys.Date()`"
 output: rmarkdown::html_vignette
 vignette: >
