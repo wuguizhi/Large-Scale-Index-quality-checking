@@ -1,0 +1,668 @@
+---
+title: "Large Scale Index quality checking"
+author: "DaN"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+# 大规模Index质检报告
+
+
+```{r, FunPar, echo = FALSE, comment = "", message=FALSE}
+binWd = '/annoroad/data1/bioinfo/PROJECT/RD/Medical/PD/autoJob/duyang/bin/'
+#binWd = '~/Desktop/nipt/index/IndexQC/'
+useRawMix <- TRUE
+minExpDepth = 3000
+minExpNormRatio = 0.3
+minExplog10NormRatio = 3
+grey = c(0.05, 0.25)
+red = c(0.4, 0.6)
+idxLen=8 
+targetPrefix='indexCHK'
+mixRates=c(0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 1)
+
+minPerAmp<-10; minTotalPerNaIdx <- 41 
+mixRateCutoff <- 0.005
+
+
+idx=read.table(file.path(binWd,'new_index.txt'), header=F, stringsAsFactors = F)
+colnames(idx)=c('indexNo', 'index')
+idx=idx[!duplicated(idx[,2]),]
+idx$GC=sapply(idx[,2], function(x) sum(strsplit(x, '')[[1]][1:idxLen] %in% c('G', 'C'))/idxLen)
+nIdx=nrow(idx)
+amp=read.table(file.path(binWd, 'amplicon'), header=F, stringsAsFactors = F)
+amp=amp[!duplicated(amp[,2]),]
+amp$GC=apply(amp, 1, function(x) sum(strsplit(x[2], '')[[1]][1:nchar(x[2])] %in% c('G', 'C'))/nchar(x[2]))
+nAmp = nrow(amp)
+
+fuckIndex=function(idxa, idxb, cutoff=NULL, grid=NULL, avg.m='g', rmRes=FALSE, oneRun=FALSE) {
+  # input assertion
+  if(length(idxa) != length(idxb)) {
+    stop('length of A and B donot match!')
+  }
+  if(!is.null(cutoff) & is.null(grid)) {
+    gooda=which(idxa >= cutoff)
+    goodb=which(idxb >= cutoff)
+  } else if(is.null(cutoff) & !is.null(grid)) {
+    if(ncol(grid) == length(idxa)) {
+      gooda=which(grid[1,]==1)
+      goodb=which(grid[2,]==1)
+    } else {
+      stop('grid size unmatch!')
+    }
+  } else {
+    stop('Neither cutoff nor grid is specified!')
+  }
+  
+  usefrq = table(c(gooda, goodb))
+  # workflow switch
+  if( rmRes ) {
+    # first batch removal or good pair to be used
+    if(all(usefrq == 1) & length(gooda) > 1 & length(goodb) > 1 ) {
+      # two unrelated ones, redsidual shall be removed
+      usea = goodb
+      useb = gooda
+      if(avg.m == 'g') {
+        resa= prod(idxa[usea]/(idxb[usea]+idxa[usea]))^(1/length(usea)) # b contaminated by a
+        resb= prod(idxb[useb]/(idxb[useb]+idxa[useb]))^(1/length(useb)) # a contaminated by b
+      } else if (avg.m == 'a') {
+        resa= mean(idxa[usea]/(idxb[usea]+idxa[usea]))
+        resb= mean(idxb[useb]/(idxb[useb]+idxa[useb]))
+      } else {
+        stop('avg.m not found!')
+      }
+
+      # remove min-effect from idxa and idexb and return the residual
+      #idxa[usea]= idxa[usea] - min(idxa[usea]) #remove 
+      #idxb[useb]= idxb[useb] - min(idxb[useb])
+      # another more restricted removal @20170424
+      mmixa<-min(idxa[usea]/(idxb[usea]+idxa[usea]), na.rm=T)
+      mmixb<-min(idxb[useb]/(idxb[useb]+idxa[useb]), na.rm=T)
+      idxa[usea] = idxa[usea] - (idxb[usea]+idxa[usea])*mmixa
+      idxb[useb] = idxb[useb] - (idxb[useb]+idxa[useb])*mmixb
+      
+      if(!useRawMix){
+        idxa=idxa/sum(idxa)
+        idxb=idxb/sum(idxb)
+      }
+      res=list(pair=c(resa, resb), resa=idxa, resb=idxb ) #mixrate was calculated before removing impact but in the order of 1-2, 2-1, 1-3, 3-1, ... , so on and so forth
+    } else {
+      # leave the pair untouched
+      res=list(pair=c(0, 0), resa=idxa, resb=idxb )
+    }
+  } else {
+    # second batch mix calculation
+    # without pre-removal, then oneRun is true, just do the normal one ,with out using overlapping amp
+    # when oneRun is false, then if no overlapping na returned, and previously calculated.
+    if(any(usefrq != 1) | oneRun) {
+      # have not been calculated before
+      if(any(usefrq > 1)) {
+        oka=! goodb %in% names(usefrq)[usefrq > 1]
+        okb=! gooda %in% names(usefrq)[usefrq > 1]
+        usea=goodb [ oka ]
+        useb=gooda [ okb ]
+      } else {
+        usea = goodb
+        useb = gooda
+      }
+      if(length(usea) == 0) {
+        resa=0
+      } else {
+        if(avg.m == 'g') {
+          resa= prod(idxa[usea]/(idxb[usea]+idxa[usea]))^(1/length(usea)) # b contaminated by a
+        } else if (avg.m == 'a') {
+          resa= mean(idxa[usea]/(idxb[usea]+idxa[usea]))
+        } else {
+          stop('avg.m not found!')
+        }
+      }
+      if(length(useb) == 0) {
+        resb=0
+      } else {
+        if(avg.m == 'g') {
+          resb= prod(idxb[useb]/(idxb[useb]+idxa[useb]))^(1/length(useb)) # a continmated by b
+        } else if (avg.m == 'a') {
+          resb= mean(idxb[useb]/(idxb[useb]+idxa[useb]))
+        } else {
+          stop('avg.m not found!')
+        }
+      }
+      res=list(pair=c(ifelse(length(usea) >= 1, resa, 0), ifelse(length(useb) >= 1, resb, 0)), resa=idxa, resb=idxb )
+    } else {
+     # check if in the second round the result is NA, if so not updating final res
+     res = NA 
+    }
+  }
+  # return
+  return( res )
+}
+
+AmpPatternMatch=function(naIdx, tgtIdx, cutoff, topN=2) {
+  # the cutoff is assumed to be captitable with the input na and tgt, say 3000 for tab and 0.25 for normStat
+  # the current rule is only ranking match, and high yield loc match, only for topN, 
+  if( all(as.integer(c(naIdx, tgtIdx)) %in% c(0,1)) ) {
+    # this is a logical vector no cutoff needed
+    yieldMatch=all( naIdx  == tgtIdx )
+  } else {
+    yieldMatch=all( (naIdx > cutoff) == (tgtIdx > cutoff) )
+  }
+  rankMatch= all( order(naIdx, decreasing = T)[seq_len(topN)] %in% order(tgtIdx, decreasing = T)[seq_len(topN)] )
+  return(yieldMatch&rankMatch)
+}
+mutGroups<-function(a, b) {
+  # # found an easy solution
+  align <- drop(attr(utils::adist(a, b, counts=TRUE), "trafos"))
+  return(align)
+}
+rmAmpCrossMix<-function(raw, grid) {
+  nAmp<-ncol(grid[,-1])
+  # lower tri, i > j, i not used, j used, i in j
+  # upper tri, i < j, i used, j not used, j in i
+  mrs<-matrix(0, ncol=nAmp, nrow=nAmp)
+  pair<-combn(nAmp, m = 2)
+  for(i in seq_len(ncol(pair))) {
+    useIndex<-which(grid[,pair[1,i]] == 1 & grid[,pair[2,i]] == 0)
+    #minRate<-min(raw[useIndex, pair[2,i]])/max(raw[useIndex, pair[1,i]], 0)
+    minRate1<-min(raw[useIndex, pair[2,i]]/(raw[useIndex, pair[2,i]]+raw[useIndex, pair[1,i]]), na.rm=T)
+    raw[useIndex, pair[2,i]]<- raw[useIndex, pair[2,i]] - minRate1*(raw[useIndex, pair[2,i]]+raw[useIndex, pair[1,i]])
+    mrs[pair[1,i], pair[2,i]]<-minRate1
+    
+    useIndex<-which(grid[,pair[2,i]] == 1 & grid[,pair[1,i]] == 0)
+    #minRate<-min(min(raw[useIndex, pair[1,i]])/max(raw[useIndex, pair[2,i]]), 0) #remove minimal
+    minRate2<-min(raw[useIndex, pair[1,i]]/(raw[useIndex, pair[1,i]]+raw[useIndex, pair[2,i]]), na.rm=T) #remove more
+    raw[useIndex, pair[1,i]]<- raw[useIndex, pair[1,i]] - minRate2*(raw[useIndex, pair[1,i]]+raw[useIndex, pair[2,i]])
+    mrs[pair[2,i], pair[1,i]]<-minRate2
+  }
+  return(list(raw, mrs))
+}
+```
+
+```{r, input, echo = FALSE, comment = "", warning=FALSE}
+opts_knit$set(upload.fun = image_uri)
+args=commandArgs(T)
+resultDir = args[1]
+libId = basename(resultDir)
+shortLib=strsplit(libId, split='_')[[1]][1]
+
+runBatch = as.character(readLines(file.path(resultDir, 'Machine'))[1])
+stat=read.table(file.path(resultDir, 'sample_trim_uniq_st_minQ.stat'), stringsAsFactors = F, header=T)
+stat$total=apply(stat, 1, function(x) sum(as.integer(x[grepl(targetPrefix, colnames(stat))])))
+stat$indexNo=idx[match(stat$index, idx[,2]), 1]
+stat$idxGC=sapply(stat$index, function(x) sum(strsplit(x, '')[[1]][1:idxLen] %in% c('G', 'C'))/idxLen)
+pcrcol=which(grepl(targetPrefix, colnames(stat)))
+stat=stat[,c(which(!grepl(targetPrefix, colnames(stat))), pcrcol[order(as.integer(gsub('indexCHK.PCR.(\\d+)', '\\1', grep(targetPrefix, colnames(stat), value = T))))])]
+
+# 
+skipUse= !seq_len(nAmp) %in% as.integer(gsub('indexCHK.PCR.(\\d+)', '\\1', grep('indexCHK', colnames(stat), value = T)))
+if(any(skipUse)) {
+    stat=cbind(stat, matrix(0, nrow=nrow(stat), ncol=sum(skipUse)))
+    colnames(stat)[ (ncol(stat)-sum(skipUse)+1) : ncol(stat)]= paste0('indexCHK.PCR.', which(skipUse))
+    pcrcol=which(grepl('indexCHK', colnames(stat)))
+    stat=stat[,c(which(!grepl('indexCHK', colnames(stat))), pcrcol[order(as.integer(gsub('indexCHK.PCR.(\\d+)', '\\1', grep('indexCHK', colnames(stat), value = T))))])]
+}
+  
+gridfile=paste0( gsub('result', 'config', resultDir),'.csv') # resultDir cant have / at the end.
+if(file.exists(gridfile)) {
+    grid=read.table(gridfile, header=T, stringsAsFactors = F, sep=';')
+    grid=grid[apply(grid[, -1], 1, function(x) any(x!=0)), ]
+    ti = grid[,1]
+    na = ncol(grid) - 1
+} else {
+    grid = NULL
+    ti= 1:96
+    na = nAmp
+}
+  
+# create a full matrix by ti + (ai-ti) + NA
+# if some index are named wrong, suppose that no read was found, then leaving an NA at that spot 
+tab=stat[NULL, ]
+# attach all known with NA if not detected in the batch
+allIdx=match(idx[,1], stat$indexNo)
+tab=rbind(tab, stat[allIdx, ])
+tab[which(is.na(allIdx)), c('indexNo', 'index', 'idxGC')]= idx[match(idx[is.na(allIdx),'indexNo'], idx[,'indexNo']),]
+tab[which(is.na(allIdx)), -match(c('indexNo', 'index', 'idxGC'), colnames(tab))]=0
+# attaching the rest
+tab=rbind(tab, stat[is.na(stat$indexNo), ])
+
+# this is the target
+targetIdx=match(ti, tab$indexNo)
+# this is the off target NA
+naIdx=which(is.na(tab$indexNo))
+allIdx=match(idx[,1], tab$indexNo)
+
+# write tab out before the correction happens
+write.table(tab, file.path(resultDir, 'sample_trim_uniq_st_minQ_re.stat'), col.names=T, row.names=F, quote=F, sep='\t')
+# add a cross-amp-wise correction
+rmres<-rmAmpCrossMix(tab[targetIdx, 6:ncol(tab)], grid[,-1])
+tab[targetIdx, 6:ncol(tab)]<-rmres[[1]]
+ampMix<-rmres[[2]]
+ampMix[is.infinite(ampMix)]<-NA
+write.table(ampMix, file.path(resultDir, 'amplicon_mix.stat'), col.names=F, row.names=F, quote=F, sep='\t')
+
+# norm stat is ordered as the same as grid if supplyed, otherwise 1:96
+rawStat<-tab[targetIdx, 6:ncol(tab)]
+normStat=t(apply(rawStat, 1, function(x) x/sum(x)))
+good=tab[targetIdx,6:ncol(tab)] > minExpDepth
+# good=normStat > grey[2] 
+
+# check for any missing or wrongly labelled index/NA pair 
+missIdx<-moreIdx<-missRes<-moreRes<-targetFind<-lowTargetLoc<-crossMixOver<-hylRes<-NULL
+if(!is.null(grid)) {
+  wanted = grid[,-1]!=0
+  minExpDepth <- sum(tab[, 'total']) / sum(grid[,-1]!=0) * grey[2]
+  minTotalPerNaIdx<-sum(tab[, 'total']) / sum(grid[,-1]!=0) * mixRateCutoff
+  
+  good = rawStat > minExpDepth 
+  targetFind = paste0(sum(good&wanted), '/',sum(grid[,-1]!=0))
+  lowcount= which(good)[which( normStat[good] > grey[1] & normStat[good] < grey[2] )] #
+  
+  if( any(good != wanted ) ) {
+    missIdx=unique( which( ( good != (grid[,-1]!=0) & !good ) )%%length(ti))
+    missIdx[missIdx==0]<-length(ti)
+    # some mismatch found, likely wrongly numbered
+    # a recored need to be saved, then a manual swap and re-run if the pattern is the same with high enough yield could be confirmed
+    missFind=lapply(missIdx, function(mi) {
+      #message(mi)
+      tmp=which(apply(tab[-targetIdx,6:ncol(tab)], 1, function(naIdxCount) AmpPatternMatch(naIdxCount>minExpDepth, grid[mi,-1], topN = floor(sum(wanted)/length(ti)))))
+      if(length(tmp)==0) {
+        return(NULL)
+      } else {
+        seq_len(nrow(tab))[-targetIdx][tmp] # can be more than one
+      }
+    })
+    if(length(unlist(missFind))>0) {
+        missRes=sapply(seq_along(missIdx), function(i) paste0(
+          paste(tab[targetIdx[missIdx[i]], c('indexNo', 'index')], collapse = '-'), 
+          ' -> ', 
+          paste(tab[missFind[[i]],c('indexNo', 'index')], collapse = '-')
+          ))
+    } else {
+      missRes<-paste0(sapply(seq_along(missIdx), function(i) paste(tab[targetIdx[missIdx[i]], c('indexNo', 'index')], collapse = '-')), ' -> NA')
+    }
+    
+    # more than expected
+    moreLoc<-which( ( good != (grid[,-1]!=0) & good ) )
+    if(length(moreLoc)> 0) {
+      moreIdx<- moreLoc%%length(ti)
+      moreRes<-sapply(unique(moreIdx), function(mi) {
+        moreAmp<-ceiling( moreLoc[moreIdx==mi]/length(ti))
+        tgtIdx<-rep(0, nAmp); tgtIdx[moreAmp]<-1
+        which(apply(grid[,-1], 1, function(srcIdx)
+          AmpPatternMatch(srcIdx, tgtIdx, topN=length(moreAmp))
+        ))
+      })
+      moreRes<-paste0(
+        sapply(seq_along(unique(moreIdx)), function(i) paste(tab[targetIdx[moreIdx[i]], c('indexNo', 'index')], collapse = '-')), 
+      ' <- ', sapply(seq_along(unique(moreIdx)), function(i) paste(tab[targetIdx[moreIdx[i]], c('indexNo', 'index')], collapse = '-'))
+        )
+    } else {
+      moreRes<-NULL #
+    }
+  }
+} else {
+    lowcount=integer(0)
+    wanted = good
+    targetFind = paste0(sum(good), '/',sum(good))
+}
+
+if(length(lowcount)>0) {
+    lowTargetLoc = paste(paste0('a',ceiling(lowcount/length(ti)), '-i', ti[lowcount%%length(ti)]), collapse=';')
+} else {
+    lowTargetLoc = NULL
+}
+
+# prep data for cross contamination 
+pair2=combn(seq_along(ti), 2)
+reslog10Norm=matrix(NA, nrow=length(ti), ncol=length(ti))
+if(useRawMix) {
+  mixStat <- rawStat
+} else {
+  mixStat <- normStat
+}
+
+# create a pair sharing status matrix, 1/TRUE if it is full rank
+sharePair<-matrix(NA, nrow=length(ti), ncol=length(ti))
+for(i in 1:ncol(pair2)) {
+  gooda=which(grid[pair2[1, i],-1]==1)
+  goodb=which(grid[pair2[2, i],-1]==1)
+  usefrq = table(c(gooda, goodb))
+  sharePair[pair2[1, i], pair2[2, i]]<-sharePair[pair2[2, i], pair2[1, i]]<-all(usefrq == 1)
+}
+
+#calculate all pairwise mixrate
+for(i in 1:ncol(pair2)) {
+  # smaller one is always a
+  resl=fuckIndex(mixStat[pair2[1, i], ], mixStat[pair2[2, i], ], grid=grid[pair2[,i],-1], avg.m='g', rmRes = F, oneRun=TRUE)
+
+  reslog10Norm[pair2[1, i], pair2[2, i]]=resl$pair[1] #upper tri resa, B cont by A
+  reslog10Norm[pair2[2, i], pair2[1, i]]=resl$pair[2] #lower tri resb, A cont by B
+}
+crossMixOver<-NULL
+tmpOver<-which( reslog10Norm > mixRateCutoff & sharePair )
+maxPairRate<-max(reslog10Norm[tmpOver], na.rm=T)
+
+nit<-1
+while(maxPairRate > mixRateCutoff) {
+  nit <- nit + 1
+  # increment the so far highest mix which is over the edge
+  maxMixOver<-which(reslog10Norm == maxPairRate)
+  rowId<-maxMixOver %% nrow(reslog10Norm)
+  rowId[rowId==0]<-nrow(reslog10Norm)
+  colId<-maxMixOver %/% nrow(reslog10Norm) +1
+  crossMixOver<-rbind(crossMixOver, data.frame(crossMixOver=maxMixOver, rowId=rowId, colId=colId))
+  
+  #message('Iter=',nit, 'maxPairRate=', maxPairRate, 'maxMixOver=',maxMixOver)
+  #remove highest bidder's shadow
+  resl=fuckIndex(mixStat[min(c(colId,rowId )), ], mixStat[max(c(colId,rowId )), ], grid=grid[range(c(colId,rowId )),-1], avg.m='g', rmRes = T, oneRun=FALSE)
+  mixStat[min(c(colId,rowId )), ]= resl$resa #residual a removed 
+  mixStat[max(c(colId,rowId )), ]= resl$resb #residual b removed
+
+  #calculate all pairwise mixrate
+  for(i in 1:ncol(pair2)) {
+    #message('pi=',i)
+    # smaller one is always a
+    mis <- c((pair2[1, i]-1)*nrow(reslog10Norm)+pair2[2, i], (pair2[2, i]-1)*nrow(reslog10Norm)+pair2[1, i])
+    if(all(! mis %in% crossMixOver$crossMixOver) ) {
+      resl=fuckIndex(mixStat[pair2[1, i], ], mixStat[pair2[2, i], ], grid=grid[pair2[,i],-1], avg.m='g', rmRes = F, oneRun=TRUE)
+      reslog10Norm[pair2[1, i], pair2[2, i]]=resl$pair[1] #upper tri resa, B cont by A
+      reslog10Norm[pair2[2, i], pair2[1, i]]=resl$pair[2] #lower tri resb, A cont by B
+    }
+  }
+  tmpOver<-which( reslog10Norm > mixRateCutoff & sharePair )
+  tmpOver<-tmpOver[!tmpOver %in% crossMixOver$crossMixOver]
+  maxPairRate<-max(reslog10Norm[tmpOver], na.rm=T)
+}
+
+colnames(reslog10Norm) <- rownames(reslog10Norm) <- ti
+#reslog10Norm <- log10(reslog10Norm*1000+1)
+reslog10Norm[is.na(reslog10Norm)]<-0
+reslog10Norm[reslog10Norm < 0 | reslog10Norm > 1]<-0
+if(length(missIdx)> 0) {
+  reslog10Norm[missIdx, ]<-0
+  reslog10Norm[, missIdx]<-0
+}
+
+# find matching NA pattern if the yield is high enough
+highYieldNA=tab[naIdx, 'total'] > minTotalPerNaIdx & apply(tab[naIdx, 6:ncol(tab)], 1, function(x) sum(x>minPerAmp) >= 2) # minExpDepth*grey[2]
+
+if(any(highYieldNA)) {
+  # NA similar to the pattern we observed or in the grid
+  highYieldLike=seq_len(nrow(tab))[targetIdx][sapply(which(highYieldNA), function(hyn) {
+    tmp=which(apply(tab[targetIdx,6:ncol(tab)], 1, function(tIdx) AmpPatternMatch(tIdx, tab[naIdx, 6:ncol(tab)][hyn, ], cutoff=minExpDepth*grey[1]/2))) #in case of errorneous usage 
+    if(length(tmp)==0) {
+      return(NA)
+    } else {
+      tmp # can be more than one
+    }
+  })]
+  withHYL= !is.na(highYieldLike)
+  hylRes = data.frame(Target= tab[highYieldLike[withHYL],c('indexNo', 'total','index')], Found=tab[naIdx, c('index', 'total')][which(highYieldNA)[withHYL],])
+  hylRes = hylRes[order(hylRes$Target.indexNo),]
+  mutG = apply(hylRes[,c('Target.index', 'Found.index')], 1, function(x) mutGroups(a=unlist(x)[1], b=unlist(x)[2]))
+  hylRes = data.frame(hylRes, mutGroups=mutG, stringsAsFactors = F)
+  rownames(hylRes) = NULL
+  
+  # perindex error rate, total error and max single error
+  hylErrorRates<-do.call(rbind, lapply(ti, function(ii) {
+    tmp<-hylRes[hylRes$Target.indexNo == ii,]
+    if(nrow(tmp) > 0) {
+        tt <- sum(tmp$Found.total) / (sum(tmp$Found.total) +  tmp$Target.total[1])
+        mm <- max(tmp$Found.total) / (sum(tmp$Found.total) +  tmp$Target.total[1])
+        ma <- tmp[which.max(tmp$Found.total), c('Found.index')]
+        mg <- tmp[which.max(tmp$Found.total), c('mutGroups')]
+    } else {
+      tt = mm = 0
+      ma <- mg<- NA
+    }
+    return(data.frame(indexNo=ii, index=idx[match(ii, idx$indexNo),2], totalErrorRate=tt, maxErrorRate=mm, maxErrorIndex=ma, maxErrorGroup=mg))
+  }))
+  hylErrorRates<-hylErrorRates[order(hylErrorRates$indexNo, decreasing = F), ]
+
+} else {
+  hylRes<-hylErrorRates<-NULL
+}
+if(length(missIdx) > 0 ) {
+  hylRes<-hylRes[!hylRes$Target.indexNo %in% ti[missIdx],]
+}
+
+corIdxGC = cor(tab[targetIdx,'total'], tab[targetIdx,'idxGC'], method = 'spearman')
+goodTargetSummary=summary(tab[targetIdx,6:ncol(tab)][good])
+targetTotal = sum(tab[targetIdx,6:ncol(tab)][good])
+knownTotal = sum(tab[allIdx, 'total'])
+allTotal = sum(tab[, 'total'])
+if(!is.null(missRes)) {
+  missResStr = paste(missRes, collapse=';')
+} else {
+  missResStr <- NULL
+}
+
+write.table(reslog10Norm, file.path(resultDir, 'sample_trim_uniq_st_minQ_re.V2.reslog10Norm'), col.names=T, row.names=F, quote=F, sep='\t')
+
+
+# corss mix rate table if over cutoff...
+crossMixOver<-which(reslog10Norm > mixRateCutoff)
+if(length(crossMixOver) > 0) {
+  rowId<-crossMixOver %% nrow(reslog10Norm)
+  rowId[rowId==0]<-nrow(reslog10Norm)
+  colId<-crossMixOver %/% nrow(reslog10Norm) +1
+  crossMixOver<-data.frame(crossMixOver, rowId, colId, stringsAsFactors = F)
+  # in pair2 it is always a < b
+  crossMixOver<-cbind(crossMixOver, do.call(rbind, apply(crossMixOver, 1, function(x) {
+    # upper tri resa, B cont by A
+    # lower tri resb, A cont by B
+    # 3 col, 2 is row (2,3)
+    if(x[3]<x[2]) {
+      # lower tri
+      data.frame(ContaminationIn= ti[x[2]], ContaminationBy = ti[x[3]], mixRate=reslog10Norm[x[1]])
+    } else {
+      # upp tri
+      data.frame(ContaminationIn= ti[x[3]], ContaminationBy = ti[x[2]], mixRate=reslog10Norm[x[1]])
+    }
+  })))
+} else {
+  crossMixOver<-NULL
+}
+
+```
+
+### 0. 基本信息
+
+* 文库编号: `r libId` 
+
+* 测序批次: `r runBatch`
+
+* 目标产出下限: `r minExpDepth` 
+
+* 目标产出（>目标产出下限）: `r targetFind` 
+
+* index产出与GC相关性: `r corIdxGC` 
+
+* 目标位置产出总数: `r as.integer(targetTotal)` 
+
+* 已知Index内产出总数: `r as.integer(knownTotal)` 
+
+* 扩增子检出总数: `r as.integer(allTotal)` 
+
+* 总错误率: `r 1-as.integer(targetTotal)/as.integer(allTotal)` 
+
+* NA Index产出下限: `r minTotalPerNaIdx` 
+
+* 产出偏低组合: `r lowTargetLoc` 
+
+
+### 1. 产出位置分布概览: 
+
+```{r, goodTargetSummary, echo = FALSE, fig.width = 12,comment=""}
+goodTargetSummary
+```
+
+### 2. 无产出Index疑似错误合成序列来源
+
+```{r, missRes, echo = FALSE,comment=""}
+options(width=160)
+if(length(missRes)>0) {
+  data.frame(missRes=missRes)
+} else {
+  NULL
+}
+```
+
+### 3. Index多余产出疑似错误合成序列来源
+
+```{r, moreRes, echo = FALSE,comment=""}
+options(width=160)
+if(length(moreRes)>0 & !is.null(moreRes)) {
+  data.frame(moreRes=moreRes)
+} else {
+  NULL
+}
+```
+
+### 4. 非index系统内index序列潜在来源 ( > `r minTotalPerNaIdx` ): 
+
+```{r, hylRes, echo = FALSE}
+options(width=160)
+if(!is.null(hylRes)) {
+  data.frame(hylRes=hylRes)
+} else {
+  NULL
+}
+```
+
+### 5. Index产出与GC的相关性: 
+
+```{r, indexGCScatter, echo = FALSE, fig.width = 12, fig.height = 12}
+## gc and total PCR bias
+plot(tab$idxGC[targetIdx], tab$total[targetIdx],xlim=c(0, 1), ylim=c(minExpDepth, max(tab$total[targetIdx])),
+   main=shortLib, xlab='idxGC', ylab='idxTotal')
+idxgcmod=lm(tab$total[targetIdx]~tab$idxGC[targetIdx])
+abline(idxgcmod$coef, col='red', lty=3)
+legend('bottomright', legend=paste(c('Int', 'Slop', 'Rsq'), round(c(idxgcmod$coef, summary(idxgcmod)$r.squared), 2), sep='='), bty='n', text.col='red')
+```
+
+### 6. 标准化产出直方图: 
+
+```{r, normStatHist, echo = FALSE, fig.width = 12, fig.height = 10}
+## hist of normlized yields
+  hist(normStat, breaks=seq(0, 1, length.out = 100), main=shortLib)
+  abline(v=grey, col='grey', lty=3)
+  abline(v=red, col='red', lty=3)
+```
+
+### 7. 待测Index内交叉污染情况: 
+
+```{r, heatmapreslog10Norm, echo = FALSE, fig.width = 12, fig.height = 10, warning =FALSE}
+## heatmap for cross contamination
+reslog10Norm <- log10(reslog10Norm*1000+1)
+gplots::heatmap.2(reslog10Norm, 
+key.xtickfun=function() {
+  cex = par("cex")*par("cex.axis")/10
+  las = 2
+  breaks = parent.frame()$breaks
+  return(list(
+  at=parent.frame()$scale01(c(breaks)),
+  labels=c(as.character((10^breaks-1)/1000))
+  ))
+}, 
+key.par=list(cex=1/2, srt=90, xpd=TRUE), breaks=log10(mixRates*1000+1), Rowv = FALSE, Colv = FALSE, key=T, scale = 'none', trace='none', 
+key.xlab=c('MixRate'), main=paste0(shortLib, '-log10NormStat'),cex.main=0.3)
+```
+
+### 8. 待测Index内交叉污染情况表 (> `r mixRateCutoff` ): 
+```{r, crossMixOver, echo = FALSE}
+#upper tri resa, B cont by A
+#lower tri resb, A cont by B
+options(width=160)
+if(!is.null(crossMixOver)) {
+  if(nrow(crossMixOver)>0) {
+    colnames(crossMixOver)[4:5]<-c('ContaminationIn', 'ContaminationBy')
+    if(length(missIdx)>0) {
+      crossMixOver <- crossMixOver[!crossMixOver[,'ContaminationIn'] %in% ti[missIdx] & !crossMixOver[,'ContaminationBy'] %in% ti[missIdx], ]
+    }
+    if(length(moreIdx)>0) {
+      crossMixOver <- crossMixOver[!crossMixOver[,'ContaminationIn'] %in% ti[moreIdx] & !crossMixOver[,'ContaminationBy'] %in% ti[moreIdx], ]
+    }
+    if(nrow(crossMixOver)==0) {
+      NULL
+    }
+    crossMixOver
+  } else {
+    NULL
+  }
+}
+```
+
+### 9. 待测Index合成／测序错误比率（> 2%）: 
+
+```{r, hylErrorRates, echo = FALSE, fig.width = 12, fig.height = 10, warning =FALSE}
+if(!is.null(hylErrorRates)) {
+  # perindex error rate, total error and max single error
+  plot(hylErrorRates$totalErrorRate, main='Per-Index Error Rate', ylab='ErrorRate', xlab='IndexNo', xaxt = "n", type='l',ylim=c(0, 0.1))
+  axis(1, at = seq_along(ti), labels = hylErrorRates$indexNo, las = 2, cex.axis = 0.6)
+  lines(hylErrorRates$maxErrorRate, col='red')
+  abline(h=mixRateCutoff, col='grey', lty=3)
+  if(nrow(hylErrorRates) > 0) {
+    if(length(missIdx)>0) {
+      hylErrorRates <- hylErrorRates[!hylErrorRates[,'indexNo'] %in% ti[missIdx] & !hylErrorRates[,'indexNo'] %in% ti[missIdx], ]
+    }
+    if(length(moreIdx)>0) {
+      hylErrorRates <- hylErrorRates[!hylErrorRates[,'indexNo'] %in% ti[moreIdx] & !hylErrorRates[,'indexNo'] %in% ti[moreIdx], ]
+    }
+    hylErrorRates<-hylErrorRates[hylErrorRates$totalErrorRate>0, ]
+    if(nrow(hylErrorRates)==0) {
+      hylErrorRates <- NULL
+    }
+    hylErrorRates
+  } else {
+    NULL
+  }
+} else {
+  NULL
+}
+```
+
+### 10. 扩增子间污染比例: 
+
+```{r, heatmaplog10ampMix, echo = FALSE, fig.width = 12, fig.height = 10, warning =FALSE}
+## heatmap for amp cross contamination
+log10ampMix <- log10(ampMix*1000+1)
+log10ampMix[is.na(log10ampMix)]<-0
+gplots::heatmap.2(log10ampMix, 
+key.xtickfun=function() {
+  cex = par("cex")*par("cex.axis")/10
+  las = 2
+  breaks = parent.frame()$breaks
+  return(list(
+  at=parent.frame()$scale01(c(breaks)),
+  labels=c(as.character((10^breaks-1)/1000))
+  ))
+}, 
+key.par=list(cex=1/2, srt=90, xpd=TRUE), breaks=log10(mixRates*1000+1), Rowv = FALSE, Colv = FALSE, key=T, scale = 'none', trace='none', 
+key.xlab=c('MixRate'), main=paste0(shortLib, '-log10ampMix'),cex.main=0.3)
+```
+
+### 11.  扩增子间污染比例表 (> `r mixRateCutoff` ): 
+```{r, ampMix, echo = FALSE}
+options(width=160)
+ampMixOver<-which(ampMix > mixRateCutoff)
+if(length(ampMixOver) > 0) {
+  rowId<-ampMixOver %% nrow(ampMix)
+  rowId[rowId==0]<-nrow(ampMix)
+  colId<-ampMixOver %/% nrow(ampMix) +1
+  data.frame(ampMixOver=ampMixOver, rowId=rowId, colId=colId, source=apply(cbind(rowId,colId ), 1, max), mixRate=ampMix[ampMixOver])
+} else {
+  NULL 
+}
+
+```
+
+
+#### SessionInfo
+```{r, SessionInfo, echo = FALSE}
+Sys.time()
+sessionInfo()
+```	
